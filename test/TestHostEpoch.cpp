@@ -1,3 +1,8 @@
+#include <sdbusplus/bus.hpp>
+#include <sdbusplus/message.hpp>
+#include <sdbusplus/test/sdbus_mock.hpp>
+#include <gtest/gtest.h>
+
 #include "host_epoch.hpp"
 #include "utils.hpp"
 #include "config.h"
@@ -5,14 +10,24 @@
 
 #include <xyz/openbmc_project/Time/error.hpp>
 
-#include <sdbusplus/bus.hpp>
-#include <gtest/gtest.h>
-
+using ::testing::_;
+using ::testing::Eq;
+using ::testing::Pointee;
+using ::testing::MatcherCast;
+using ::testing::IsNull;
 
 namespace phosphor
 {
 namespace time
 {
+
+namespace // anonymous
+{
+constexpr auto SYSTEMD_TIME_SERVICE = "org.freedesktop.timedate1";
+constexpr auto SYSTEMD_TIME_PATH = "/org/freedesktop/timedate1";
+constexpr auto SYSTEMD_TIME_INTERFACE = "org.freedesktop.timedate1";
+constexpr auto METHOD_SET_TIME = "SetTime";
+}
 
 using namespace std::chrono;
 using namespace std::chrono_literals;
@@ -24,6 +39,7 @@ const constexpr microseconds USEC_ZERO{0};
 class TestHostEpoch : public testing::Test
 {
     public:
+        sdbusplus::SdBusMock mockedSdbus;
         sdbusplus::bus::bus bus;
         HostEpoch hostEpoch;
 
@@ -32,7 +48,7 @@ class TestHostEpoch : public testing::Test
         const microseconds delta = 2s;
 
         TestHostEpoch()
-            : bus(sdbusplus::bus::new_default()),
+            : bus(sdbusplus::get_mocked_new(&mockedSdbus)),
               hostEpoch(bus, OBJPATH_HOST)
         {
             // Make sure the file does not exist
@@ -75,13 +91,31 @@ class TestHostEpoch : public testing::Test
             // By default offset shall be 0
             EXPECT_EQ(0, getOffset().count());
 
-            // Set time is not allowed,
-            // so verify offset is still 0 after set time
+            // Set time is not allowed, verify exception is thrown
             microseconds diff = 1min;
             EXPECT_THROW(
                 hostEpoch.elapsed(hostEpoch.elapsed() + diff.count()),
                 NotAllowed);
-            EXPECT_EQ(0, getOffset().count());
+        }
+
+        void expectSetTimeAllowed(uint64_t t)
+        {
+            EXPECT_CALL(mockedSdbus, sd_bus_message_new_method_call(
+                        IsNull(), _,
+                        SYSTEMD_TIME_SERVICE,
+                        SYSTEMD_TIME_PATH,
+                        SYSTEMD_TIME_INTERFACE,
+                        METHOD_SET_TIME)).Times(1);
+            // The target time to set
+            EXPECT_CALL(mockedSdbus,
+	                sd_bus_message_append_basic(_, 'x',
+	                    MatcherCast<const void*>(MatcherCast<const int64_t*>
+	                    (Pointee(Eq(t))))));
+            // The parameters pass to sdbus call
+            EXPECT_CALL(mockedSdbus,
+	                sd_bus_message_append_basic(_, 'b',
+	                    MatcherCast<const void*>(MatcherCast<const int*>
+	                    (Pointee(Eq(0)))))).Times(2);
         }
 
         void checkSetSplitTimeInFuture()
@@ -111,6 +145,7 @@ class TestHostEpoch : public testing::Test
             EXPECT_GT(epochDiff, (diff - delta).count());
             EXPECT_LT(epochDiff, (diff + delta).count());
         }
+
         void checkSetSplitTimeInPast()
         {
             // Get current time, and set past -1min time
@@ -219,9 +254,14 @@ TEST_F(TestHostEpoch, setElapsedInManualHost)
 {
     // Set time in MANUAL/HOST, time will be set to BMC
     // However it requies gmock to test this case
-    // TODO: when gmock is ready, test this case.
     setTimeMode(Mode::Manual);
     setTimeOwner(Owner::Host);
+
+    auto now = hostEpoch.elapsed();
+    microseconds diff = 1min;
+
+    expectSetTimeAllowed(now + diff.count());
+    hostEpoch.elapsed(now + diff.count());
 }
 
 TEST_F(TestHostEpoch, setElapsedInManualSplit)
@@ -241,9 +281,14 @@ TEST_F(TestHostEpoch, setElapsedInManualBoth)
 {
     // Set time in MANUAL/BOTH, time will be set to BMC
     // However it requies gmock to test this case
-    // TODO: when gmock is ready, test this case.
     setTimeMode(Mode::Manual);
     setTimeOwner(Owner::Both);
+
+    auto now = hostEpoch.elapsed();
+    microseconds diff = 3min;
+
+    expectSetTimeAllowed(now + diff.count());
+    hostEpoch.elapsed(now + diff.count());
 }
 
 TEST_F(TestHostEpoch, setElapsedInSplitAndBmcTimeIsChanged)
