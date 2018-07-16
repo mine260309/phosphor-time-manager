@@ -1,26 +1,45 @@
-#include "bmc_epoch.hpp"
-#include "config.h"
-#include "types.hpp"
-#include "mocked_bmc_time_change_listener.hpp"
-
 #include <gtest/gtest.h>
 #include <memory>
 #include <sdbusplus/bus.hpp>
+#include <sdbusplus/message.hpp>
+#include <sdbusplus/test/sdbus_mock.hpp>
+
 #include <xyz/openbmc_project/Time/error.hpp>
+
+#include "config.h"
+#include "bmc_epoch.hpp"
+#include "mocked_bmc_time_change_listener.hpp"
+#include "types.hpp"
+
+
+using ::testing::_;
+using ::testing::Eq;
+using ::testing::Pointee;
+using ::testing::MatcherCast;
+using ::testing::IsNull;
 
 namespace phosphor
 {
 namespace time
 {
 
+namespace // anonymous
+{
+constexpr auto SYSTEMD_TIME_SERVICE = "org.freedesktop.timedate1";
+constexpr auto SYSTEMD_TIME_PATH = "/org/freedesktop/timedate1";
+constexpr auto SYSTEMD_TIME_INTERFACE = "org.freedesktop.timedate1";
+constexpr auto METHOD_SET_TIME = "SetTime";
+}
 using ::testing::_;
 using namespace std::chrono;
+using namespace std::chrono_literals;
 using NotAllowed =
     sdbusplus::xyz::openbmc_project::Time::Error::NotAllowed;
 
 class TestBmcEpoch : public testing::Test
 {
     public:
+        sdbusplus::SdBusMock mockedSdbus;
         sdbusplus::bus::bus bus;
         sd_event* event;
         MockBmcTimeChangeListener listener;
@@ -66,6 +85,26 @@ class TestBmcEpoch : public testing::Test
                                    0,
                                    bmcEpoch.get());
         }
+        void expectSetTimeAllowed(uint64_t t)
+        {
+            EXPECT_CALL(mockedSdbus, sd_bus_message_new_method_call(
+                        IsNull(), _,
+                        SYSTEMD_TIME_SERVICE,
+                        SYSTEMD_TIME_PATH,
+                        SYSTEMD_TIME_INTERFACE,
+                        METHOD_SET_TIME)).Times(1);
+            // The target time to set
+            EXPECT_CALL(mockedSdbus,
+	                sd_bus_message_append_basic(_, 'x',
+	                    MatcherCast<const void*>(MatcherCast<const int64_t*>
+	                    (Pointee(Eq(t))))));
+            // The parameters pass to sdbus call
+            EXPECT_CALL(mockedSdbus,
+	                sd_bus_message_append_basic(_, 'b',
+	                    MatcherCast<const void*>(MatcherCast<const int*>
+	                    (Pointee(Eq(0)))))).Times(2);
+        }
+
 };
 
 TEST_F(TestBmcEpoch, empty)
@@ -98,9 +137,17 @@ TEST_F(TestBmcEpoch, setElapsedNotAllowed)
 
 TEST_F(TestBmcEpoch, setElapsedOK)
 {
-    // TODO: setting time will call sd-bus functions and it will fail on host
-    // if we have gmock for sdbusplus::bus, we can test setElapsed.
-    // But for now we can not test it
+    // Hack the bus with mockedSdbus
+    bus = sdbusplus::get_mocked_new(&mockedSdbus);
+
+    setTimeMode(Mode::Manual);
+    setTimeOwner(Owner::BMC);
+
+    auto now = bmcEpoch->elapsed();
+    microseconds diff = 1min;
+
+    expectSetTimeAllowed(now + diff.count());
+    bmcEpoch->elapsed(now + diff.count());
 }
 
 TEST_F(TestBmcEpoch, onTimeChange)
